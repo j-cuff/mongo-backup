@@ -1,0 +1,18 @@
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Default backup output directories
+/source-backup-*/
+
+# Backup artifacts when --backup-dir uses a custom directory name
+INCOMPLETE
+COMPLETED
+SHA256SUMS
+backup_summary.txt
+port-forward.log
+.mongo-dump/
+cleaned-secrets/
+hubbledb/
+hubble_timeseriesdb/
+hubble_archivedb/
