@@ -495,7 +495,7 @@ discover_primary() {
             --tls \
             --tlsCAFile /var/mongodb/tls/ca.crt \
             --tlsCertificateKeyFile /var/mongodb/tls/tls-combined.pem \
-            --tlsAllowInvalidCertificates \
+            --tlsInsecure \
             --quiet \
             --eval "rs.status().members.map(m => ({name: m.name, state: m.stateStr, health: m.health, optime: m.optimeDate}))"
     )"; then
@@ -633,7 +633,7 @@ dump_databases_locally() {
             --tls
             --tlsCAFile "$TLS_TEMP_DIR/ca.crt"
             --tlsCertificateKeyFile "$TLS_TEMP_DIR/tls-combined.pem"
-            --tlsAllowInvalidCertificates
+            --tlsInsecure
         )
     else
         tls_options=(
