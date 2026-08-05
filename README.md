@@ -21,27 +21,33 @@ therefore requires `--agent-upgrade-paused` as an explicit operator
 confirmation. Remember to follow your change procedure for restoring that
 setting after the backup window.
 
-## Requirements
+## Before you run
+
+The supported jump hosts are:
+
+- Ubuntu 24.04 x86-64
+- Rocky Linux 9.7 x86-64
+
+You must provide:
 
 - Bash 3.2 or newer
-- `kubectl` with access to the source cluster
-- MongoDB Database Tools (`mongodump`) installed on the jump host
-- `python3`, `base64`, `awk`, `find`, `sort`, `du`
-- `sha256sum` (Ubuntu) or `shasum` (macOS)
+- `kubectl` configured for the source cluster and compatible with its Kubernetes
+  version
+- A readable kubeconfig
 - Permission to read secrets and pods, exec into MongoDB pods, and port-forward
   pods in `hubble-system`
+- Access to the host's configured apt or dnf repositories if prerequisites must
+  be installed
 
-The procedure targets an Ubuntu 24.04 jump host and shows how to install
-Kubernetes `kubectl` v1.29. This script does not run `apt upgrade` or install
-packages automatically. MongoDB Database Tools are distributed separately from
-MongoDB Server; the Palette MongoDB container does not include `mongodump`.
-Install a Database Tools release compatible with MongoDB 8.0 on the jump host
-before running the script. `skopeo` is listed in the PDF prerequisites but is
-not used by this backup workflow.
+Kubectl is intentionally not bundled, installed, or replaced. `skopeo` is
+listed in the source PDF prerequisites but is not used by this workflow.
 
-## Run
+## Run the backup
 
 First inspect the resolved plan without connecting to the cluster:
+
+Running the script without arguments displays its usage and exits without
+starting a backup.
 
 ```bash
 ./palette-ec-backup.sh \
@@ -59,6 +65,27 @@ Then run the backup after pausing agent upgrades:
   --agent-upgrade-paused
 ```
 
+That is the only script you normally need to execute. Before contacting the
+cluster, `palette-ec-backup.sh` checks for MongoDB Database Tools and the local
+commands used by the backup. If anything installable is missing, it detects the
+operating system and displays a confirmation prompt such as:
+
+```text
+[WARNING] Missing local backup prerequisites: mongodump
+[INFO] Detected installation target: Rocky Linux 9.7 x86-64
+Install the bundled MongoDB tools and required OS packages now? [y/N]:
+```
+
+Answering `y` runs the bundled installer. It may request sudo access, verifies
+the bundled package checksums, refreshes apt or dnf metadata, installs the
+required OS packages, and installs MongoDB Database Tools 100.17.0. It never
+runs an operating-system upgrade. After installation, the backup script verifies
+the commands again and continues automatically.
+
+Answering anything else stops the backup without changing packages. `--dry-run`
+never prompts or installs software. If kubectl is missing, the script reports it
+separately because kubectl is not part of the bundle.
+
 The output directory must not already exist. This prevents old and new backup
 files from being mixed.
 
@@ -71,6 +98,31 @@ otherwise, the script selects an available port. Collection reads are serialized
 to avoid concurrent TLS handshakes overwhelming the Kubernetes port-forward. If
 the dump fails, `port-forward.log` is retained in the incomplete backup
 directory for diagnosis.
+
+## Prerequisite bundle
+
+The repository includes MongoDB Database Tools 100.17.0 packages for both
+supported operating systems:
+
+- Ubuntu package: `mongodb-database-tools-ubuntu2404-x86_64-100.17.0.deb`
+- Rocky-compatible RHEL 9 package:
+  `mongodb-database-tools-rhel93-x86_64-100.17.0.rpm`
+
+To verify both bundled artifacts without installing anything:
+
+```bash
+./install-prerequisites.sh --verify-only
+```
+
+You can also invoke the installer directly for host preparation or
+troubleshooting:
+
+```bash
+sudo ./install-prerequisites.sh
+```
+
+See [`prerequisites/README.md`](prerequisites/README.md) for upstream URLs,
+hashes, package provenance, and platform constraints.
 
 ## Output
 

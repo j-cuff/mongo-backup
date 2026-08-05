@@ -7,6 +7,8 @@
 set -Eeuo pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PREREQUISITE_INSTALLER="${SCRIPT_DIR}/install-prerequisites.sh"
 readonly -a DATABASES=(hubbledb hubble_timeseriesdb hubble_archivedb)
 
 KUBECONFIG_FILE=""
@@ -194,8 +196,109 @@ EOF
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
         log_error "Required command not found: $1"
+        if [[ "$1" == "mongodump" ]]; then
+            log_error "Install the bundled MongoDB tools with: sudo ./install-prerequisites.sh"
+        elif [[ "$1" == "kubectl" ]]; then
+            log_error "Install a kubectl version compatible with the target cluster"
+        fi
         return 1
     fi
+}
+
+detect_prerequisite_install_target() {
+    local os_id=""
+    local os_version=""
+
+    [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]] ||
+        return 1
+    [[ -r /etc/os-release ]] || return 1
+
+    os_id="$(. /etc/os-release; printf '%s' "${ID:-}")"
+    os_version="$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")"
+
+    case "${os_id}:${os_version}" in
+        ubuntu:24.04)
+            printf '%s' "Ubuntu 24.04 x86-64"
+            ;;
+        rocky:9.7)
+            printf '%s' "Rocky Linux 9.7 x86-64"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+collect_missing_installable_commands() {
+    local command_name
+    local missing_output=""
+
+    for command_name in mongodump base64 awk find grep sed sort du python3; do
+        if ! command -v "${command_name}" >/dev/null 2>&1; then
+            missing_output+="${missing_output:+$'\n'}${command_name}"
+        fi
+    done
+    if ! command -v sha256sum >/dev/null 2>&1 &&
+        ! command -v shasum >/dev/null 2>&1; then
+        missing_output+="${missing_output:+$'\n'}sha256sum"
+    fi
+
+    printf '%s' "${missing_output}"
+}
+
+ensure_local_prerequisites() {
+    local answer=""
+    local command_name
+    local detected_target=""
+    local missing_output=""
+    local -a missing=()
+
+    missing_output="$(collect_missing_installable_commands)"
+    if [[ -z "${missing_output}" ]]; then
+        return 0
+    fi
+
+    while IFS= read -r command_name; do
+        [[ -n "${command_name}" ]] && missing+=("${command_name}")
+    done <<<"${missing_output}"
+
+    log_warning "Missing local backup prerequisites: ${missing[*]}"
+    if ! command -v kubectl >/dev/null 2>&1; then
+        log_warning "kubectl is also missing and is not included in the bundle. Install a cluster-compatible kubectl before the backup can continue."
+    fi
+    if ! detected_target="$(detect_prerequisite_install_target)"; then
+        log_error "Automatic prerequisite installation supports only Ubuntu 24.04 and Rocky Linux 9.7 x86-64."
+        log_error "Install the missing commands manually, then rerun ${SCRIPT_NAME}."
+        return 1
+    fi
+
+    log_info "Detected installation target: ${detected_target}"
+    if [[ ! -x "${PREREQUISITE_INSTALLER}" ]]; then
+        log_error "Prerequisite installer is missing or not executable: ${PREREQUISITE_INSTALLER}"
+        return 1
+    fi
+
+    printf 'Install the bundled MongoDB tools and required OS packages now? [y/N]: ' >&2
+    if ! read -r answer; then
+        answer=""
+    fi
+    case "${answer}" in
+        y|Y|yes|YES)
+            "${PREREQUISITE_INSTALLER}"
+            ;;
+        *)
+            log_error "Prerequisite installation declined. No packages were changed."
+            return 1
+            ;;
+    esac
+
+    missing_output="$(collect_missing_installable_commands)"
+    if [[ -n "${missing_output}" ]]; then
+        log_error "Prerequisites are still missing after installation: $(printf '%s' "${missing_output}" | tr '\n' ' ')"
+        return 1
+    fi
+
+    log_success "Local backup prerequisites are ready."
 }
 
 decode_base64() {
@@ -218,8 +321,13 @@ detect_mongodump_tls_options() {
     version_output="$(mongodump --version 2>&1 || true)"
     MONGODUMP_VERSION="${version_output%%$'\n'*}"
 
-    if grep -q -- '--tlsCAFile' <<<"$help_output"; then
+    if grep -q -- '--tlsCAFile' <<<"$help_output" &&
+        grep -q -- '--tlsAllowInvalidCertificates' <<<"$help_output"; then
         MONGODUMP_TLS_STYLE="tls"
+    elif grep -q -- '--tlsCAFile' <<<"$help_output"; then
+        log_error "Installed mongodump does not support required option --tlsAllowInvalidCertificates"
+        log_error "Detected: ${MONGODUMP_VERSION:-unknown mongodump version}"
+        return 1
     elif grep -q -- '--sslCAFile' <<<"$help_output"; then
         MONGODUMP_TLS_STYLE="ssl"
     else
@@ -387,7 +495,7 @@ discover_primary() {
             --tls \
             --tlsCAFile /var/mongodb/tls/ca.crt \
             --tlsCertificateKeyFile /var/mongodb/tls/tls-combined.pem \
-            --tlsAllowInvalidHostnames \
+            --tlsAllowInvalidCertificates \
             --quiet \
             --eval "rs.status().members.map(m => ({name: m.name, state: m.stateStr, health: m.health, optime: m.optimeDate}))"
     )"; then
@@ -525,7 +633,7 @@ dump_databases_locally() {
             --tls
             --tlsCAFile "$TLS_TEMP_DIR/ca.crt"
             --tlsCertificateKeyFile "$TLS_TEMP_DIR/tls-combined.pem"
-            --tlsAllowInvalidHostnames
+            --tlsAllowInvalidCertificates
         )
     else
         tls_options=(
@@ -640,6 +748,11 @@ write_summary() {
 }
 
 main() {
+    if (($# == 0)); then
+        usage
+        return 0
+    fi
+
     parse_arguments "$@"
     validate_local_inputs
 
@@ -647,6 +760,8 @@ main() {
         print_plan
         exit 0
     fi
+
+    ensure_local_prerequisites
 
     trap on_exit EXIT
 
@@ -689,4 +804,6 @@ main() {
     log_warning "Keep this directory secure: it contains database data and Kubernetes secrets."
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
